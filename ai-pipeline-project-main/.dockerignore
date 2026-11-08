@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.env
+.git/
+.venv/
+venv/
+ollama_data/
+*.zip
+tests/
+requirements-dev.txt
+README.md

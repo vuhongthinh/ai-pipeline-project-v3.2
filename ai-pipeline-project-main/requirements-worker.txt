@@ -1,0 +1,6 @@
+celery[redis]==5.3.4
+minio==7.2.7
+psycopg2-binary==2.9.9
+requests==2.32.3
+# Resize ảnh trước khi gửi sang VLM (cạnh dài ~1024px, đỡ phình base64)
+pillow==11.3.0

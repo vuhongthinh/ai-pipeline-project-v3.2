@@ -1,0 +1,14 @@
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+
+COPY requirements-dashboard.txt .
+RUN pip install --no-cache-dir -r requirements-dashboard.txt
+
+COPY dashboard.py .
+
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser /app
+USER appuser
+
+EXPOSE 8501
+CMD ["streamlit", "run", "dashboard.py", "--server.port", "8501", "--server.address", "0.0.0.0"]

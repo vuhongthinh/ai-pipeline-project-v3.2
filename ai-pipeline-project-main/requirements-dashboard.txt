@@ -1,0 +1,6 @@
+# >=1.54.0: bản vá advisory bảo mật của cây phụ thuộc dashboard (cũ: 1.35.0)
+streamlit>=1.54.0
+pandas==2.2.2
+psycopg2-binary==2.9.9
+# Presigned URL cho cột "Tệp"
+minio==7.2.7

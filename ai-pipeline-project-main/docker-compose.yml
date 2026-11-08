@@ -1,0 +1,213 @@
+# Cấu hình hướng tới laptop CPU-only: model mặc định nhẹ, Ollama chỉ chạy
+# 1 model cùng lúc. Máy mạnh hơn chỉ cần đổi model trong .env.
+services:
+  minio:
+    # MinIO ngừng phát hành image trên Docker Hub; bản phát hành nằm trên quay.io.
+    image: quay.io/minio/minio:RELEASE.2024-08-17T01-00-00Z
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-localminio}
+      # Bắt buộc đặt mật khẩu trong .env - không còn giá trị dự phòng đã biết.
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Hãy đặt MINIO_ROOT_PASSWORD trong .env}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Laptop CPU-only: giới hạn bộ nhớ cache Redis, AOF mỗi 1s là đủ dev.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: pipeline
+      POSTGRES_USER: pipeline_user
+      # Bắt buộc đặt mật khẩu trong .env - không còn giá trị dự phòng đã biết.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Hãy đặt POSTGRES_PASSWORD trong .env}
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/001-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pipeline_user -d pipeline"]
+      interval: 5s
+      timeout: 5s
+      retries: 15
+    restart: unless-stopped
+
+  ollama:
+    image: ollama/ollama:latest
+    environment:
+      # Laptop CPU-only: chỉ giữ 1 model trong RAM và xử lý 1 request mỗi lúc.
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 15s
+    restart: unless-stopped
+    # Nếu muốn chặn cứng tài nguyên (docker compose v2 áp dụng cả khi không chạy swarm):
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 6g
+
+  # Tự pull model một lần lúc khởi động để task không fail vì 404 "model not found".
+  ollama-init:
+    image: ollama/ollama:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      # Nhẹ cho laptop CPU; nâng cấp trong .env nếu muốn.
+      OLLAMA_TEXT_MODEL: ${OLLAMA_TEXT_MODEL:-llama3.2:1b}
+      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-moondream}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Đang đảm bảo model đã tải: $$OLLAMA_TEXT_MODEL, $$OLLAMA_VISION_MODEL ..."
+        ollama show "$$OLLAMA_TEXT_MODEL" >/dev/null 2>&1 || ollama pull "$$OLLAMA_TEXT_MODEL"
+        ollama show "$$OLLAMA_VISION_MODEL" >/dev/null 2>&1 || ollama pull "$$OLLAMA_VISION_MODEL"
+        echo "Models sẵn sàng."
+    restart: "no"
+
+  whisper:
+    build:
+      context: .
+      dockerfile: Dockerfile.whisper
+    environment:
+      # "base" nhanh trên CPU (yếu tiếng Việt hơn); "small" chất lượng hơn nhưng chậm.
+      WHISPER_MODEL: ${WHISPER_MODEL:-base}
+      WHISPER_LANGUAGE: ${WHISPER_LANGUAGE:-vi}
+    ports:
+      - "127.0.0.1:8888:8888"
+    volumes:
+      # Cache model: không volume thì mỗi lần `down`/rebuild là tải lại model.
+      - whisper_cache:/app/.cache/whisper
+    restart: unless-stopped
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 3g
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    environment: &app-env
+      MINIO_URL: minio:9000
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-localminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Hãy đặt MINIO_ROOT_PASSWORD trong .env}
+      MINIO_BUCKET: uploads
+      REDIS_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      PG_URL: postgresql://pipeline_user:${POSTGRES_PASSWORD:?Hãy đặt POSTGRES_PASSWORD trong .env}@postgres:5432/pipeline
+      OLLAMA_URL: http://ollama:11434
+      OLLAMA_TEXT_MODEL: ${OLLAMA_TEXT_MODEL:-llama3.2:1b}
+      OLLAMA_VISION_MODEL: ${OLLAMA_VISION_MODEL:-moondream}
+      OLLAMA_NUM_CTX: ${OLLAMA_NUM_CTX:-8192}
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+      WHISPER_URL: http://whisper:8888
+      MAX_IMAGE_SIZE: ${MAX_IMAGE_SIZE:-10485760}
+      # Tuỳ chọn: đặt giá trị khác rỗng để bật xác thực X-API-Key cho /upload.
+      API_KEY: ${API_KEY:-}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      whisper:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    command: ["celery", "-A", "celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_started
+      whisper:
+        condition: service_started
+      ollama-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 3g
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      PG_URL: postgresql://pipeline_user:${POSTGRES_PASSWORD:?Hãy đặt POSTGRES_PASSWORD trong .env}@postgres:5432/pipeline
+      MINIO_URL: minio:9000
+      # Địa chỉ TRÌNH DUYỆT người dùng dùng để mở presigned URL (chữ ký SigV4
+      # tính cả Host nên phải ký bằng endpoint công khai ngay từ đầu).
+      MINIO_PUBLIC_URL: ${MINIO_PUBLIC_URL:-localhost:9000}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-localminio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?Hãy đặt MINIO_ROOT_PASSWORD trong .env}
+    ports:
+      - "127.0.0.1:8501:8501"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_started
+    restart: unless-stopped
+
+  # Bot demo chỉ chạy khi bật profile "demo": docker compose --profile demo up
+  clawbot:
+    build:
+      context: .
+      dockerfile: Dockerfile.clawbot
+    environment:
+      API_URL: http://api:8000/upload
+      API_KEY: ${API_KEY:-}
+    depends_on:
+      api:
+        condition: service_started
+    profiles: ["demo"]
+    restart: unless-stopped
+
+volumes:
+  minio_data:
+  redis_data:
+  postgres_data:
+  ollama_data:
+  whisper_cache:

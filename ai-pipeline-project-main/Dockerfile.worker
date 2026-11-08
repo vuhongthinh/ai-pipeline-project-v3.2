@@ -1,0 +1,16 @@
+FROM python:3.11-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+
+# psycopg2-binary không cần gcc/libpq-dev.
+COPY requirements-worker.txt .
+RUN pip install --no-cache-dir -r requirements-worker.txt
+
+COPY tasks.py celery_app.py ./
+
+RUN useradd --create-home --uid 1000 appuser && chown -R appuser /app
+USER appuser
+
+# DB pool được tạo lười trong từng process con, nên an toàn khi tăng
+# --concurrency; giữ 1 nếu máy yếu.
+CMD ["celery", "-A", "celery_app", "worker", "--loglevel=INFO", "--concurrency=1"]

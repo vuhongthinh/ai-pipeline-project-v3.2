@@ -1,0 +1,4 @@
+pytest>=8.0
+httpx>=0.27
+# Postgres thật đóng gói trong wheel - dùng cho tests/test_migration.py
+pgserver>=0.1.4
